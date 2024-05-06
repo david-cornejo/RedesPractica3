@@ -1,4 +1,5 @@
 package server;
+import org.json.JSONObject;
 import util.MimeTypes;
 import java.io.*;
 import java.net.Socket;
@@ -6,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import org.apache.commons.fileupload.MultipartStream;
+import java.util.stream.Collectors;
 
 
 public class RequestHandler implements Runnable {
@@ -45,7 +46,6 @@ public class RequestHandler implements Runnable {
                     handlePost(inputStream, out, contentType);
                     break;
                 case "PUT":
-                    handlePut(inputStream, resource, out);
                     break;
                 case "HEAD":
                     handleHead(resource, out);
@@ -98,35 +98,22 @@ public class RequestHandler implements Runnable {
     }
 
     private void handlePost(InputStream in, OutputStream out, String contentType) throws IOException {
+        // Leer el cuerpo de la solicitud
         BufferedReader reader = new BufferedReader(new InputStreamReader(in));
-        if (contentType.startsWith("multipart/form-data")) {
-            handleMultipartData(in, out, contentType);
-        } else {
-            StringBuilder payload = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null && !line.isEmpty()) {
-                payload.append(line + "\n");
-            }
-            createFileFromPayload(payload.toString(), out);
-        }
+        String body = reader.lines().collect(Collectors.joining(System.lineSeparator()));
+
+        // Aquí puedes procesar el cuerpo y generar un archivo basado en los datos recibidos
+        // Por ejemplo, crear un archivo PDF, una imagen, etc.
+        // Vamos a suponer que generamos un archivo de texto simple para simplificar
+        Path filePath = Paths.get("output.txt");
+        Files.write(filePath, body.getBytes(StandardCharsets.UTF_8));
+
+        // Enviar el archivo generado como respuesta
+        sendFile(filePath, out);
     }
 
     private void handlePut(InputStream in, String resource, OutputStream out) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in));
-        Path filePath = getFilePath(resource);
 
-        StringBuilder payload = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null && !line.isEmpty()) {
-            payload.append(line + "\n");
-        }
-
-        Files.write(filePath, payload.toString().getBytes());
-
-        String response = "Data received and written in PUT request to " + resource;
-        sendHeader(200, "OK", "text/plain", response.length(), out);
-        out.write(response.getBytes());
-        out.flush();
     }
 
     private Path getFilePath(String resource) {
@@ -147,62 +134,7 @@ public class RequestHandler implements Runnable {
         writer.flush();
     }
 
-    private void createFileFromPayload(String data, OutputStream out) throws IOException {
-        String fileName = "received_" + System.currentTimeMillis() + ".txt";
-        Path path = Paths.get(fileName);
-        try {
-            Files.write(path, data.getBytes());
-            sendHeader(201, "Created", "text/plain", 0, out);  // No body content
-            out.flush();
-        } catch (IOException e) {
-            sendError(500, "Internal Server Error", out, true);
-        }
-    }
-
-    private void handleMultipartData(InputStream in, OutputStream out, String contentType) throws IOException {
-        String boundary = contentType.split("boundary=")[1];
-        MultipartStream multipartStream = new MultipartStream(in, boundary.getBytes());
-
-        boolean nextPart = multipartStream.skipPreamble();
-        while (nextPart) {
-            String headers = multipartStream.readHeaders();
-            String filename = extractFilename(headers);
-
-            if (filename != null) {
-                File outputFile = new File("\\Users\\david\\OneDrive - Instituto Politecnico Nacional\\ESCOM\\8vo Semestre\\Aplicaciones para comunicaciones en red\\Practica3\\Practica3\\.\\", filename); // Asegúrate de que el directorio 'uploads' existe y es accesible
-                try (FileOutputStream outputFileStream = new FileOutputStream(outputFile)) {
-                    multipartStream.readBodyData(outputFileStream);
-                }
-                System.out.println("Archivo guardado: " + outputFile.getAbsolutePath());
-            } else {
-                // Manejar otros datos del formulario
-                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-                multipartStream.readBodyData(outputStream);
-                String formData = outputStream.toString(StandardCharsets.UTF_8.name());
-                System.out.println("Datos del formulario: " + formData);
-            }
-            nextPart = multipartStream.readBoundary();
-        }
-        sendHeader(201, "Created", "text/plain", 0, out);
-        out.flush();
-    }
-
-    private String extractFilename(String headers) {
-        final String disposition = "Content-Disposition: form-data;";
-        int start = headers.indexOf(disposition);
-        if (start >= 0) {
-            String[] parts = headers.substring(start + disposition.length()).split(";");
-            for (String part : parts) {
-                part = part.trim();
-                if (part.startsWith("filename=")) {
-                    return part.substring(10, part.length() - 1); // Remover las comillas
-                }
-            }
-        }
-        return null;
-    }
-
-    private String getContentType(BufferedReader headerReader) throws IOException {
+     private String getContentType(BufferedReader headerReader) throws IOException {
         String line;
         String contentType = "application/octet-stream"; // Default value
         while (!(line = headerReader.readLine()).isEmpty()) {
@@ -212,6 +144,28 @@ public class RequestHandler implements Runnable {
             }
         }
         return contentType;
+    }
+
+    private void sendFile(Path filePath, OutputStream out) throws IOException {
+        if (Files.exists(filePath)) {
+            String mimeType = MimeTypes.getMimeType(filePath.toString());
+            long fileSize = Files.size(filePath);
+
+            // Enviar cabeceras HTTP adecuadas para la descarga de archivos
+            PrintWriter writer = new PrintWriter(out, true);
+            writer.println("HTTP/1.1 200 OK");
+            writer.println("Content-Type: " + mimeType);
+            writer.println("Content-Disposition: attachment; filename=\"" + filePath.getFileName().toString() + "\"");
+            writer.println("Content-Length: " + fileSize);
+            writer.println(); // Línea en blanco para terminar las cabeceras
+            writer.flush();
+
+            // Enviar el archivo
+            Files.copy(filePath, out);
+            out.flush();
+        } else {
+            sendError(404, "File not found", out, true);
+        }
     }
 
     private void sendError(int statusCode, String message, OutputStream out, boolean includeBody) throws IOException {
