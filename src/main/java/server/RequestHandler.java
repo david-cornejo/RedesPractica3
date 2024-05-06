@@ -166,25 +166,40 @@ public class RequestHandler implements Runnable {
         boolean nextPart = multipartStream.skipPreamble();
         while (nextPart) {
             String headers = multipartStream.readHeaders();
-            // Aquí deberías parsear los headers para obtener información como el nombre del archivo, etc.
+            String filename = extractFilename(headers);
 
-            if (headers.contains("filename")) {
-                // Abre un OutputStream para escribir el contenido del archivo si es parte de archivo
-                File outputFile = new File("destinationPath", "filename_here");
+            if (filename != null) {
+                File outputFile = new File("\\Users\\david\\OneDrive - Instituto Politecnico Nacional\\ESCOM\\8vo Semestre\\Aplicaciones para comunicaciones en red\\Practica3\\Practica3\\.\\", filename); // Asegúrate de que el directorio 'uploads' existe y es accesible
                 try (FileOutputStream outputFileStream = new FileOutputStream(outputFile)) {
                     multipartStream.readBodyData(outputFileStream);
                 }
+                System.out.println("Archivo guardado: " + outputFile.getAbsolutePath());
             } else {
                 // Manejar otros datos del formulario
                 ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
                 multipartStream.readBodyData(outputStream);
                 String formData = outputStream.toString(StandardCharsets.UTF_8.name());
-                // Procesar formData
+                System.out.println("Datos del formulario: " + formData);
             }
             nextPart = multipartStream.readBoundary();
         }
-        sendHeader(201, "Created", "text/plain", 0, out);  // No body content
+        sendHeader(201, "Created", "text/plain", 0, out);
         out.flush();
+    }
+
+    private String extractFilename(String headers) {
+        final String disposition = "Content-Disposition: form-data;";
+        int start = headers.indexOf(disposition);
+        if (start >= 0) {
+            String[] parts = headers.substring(start + disposition.length()).split(";");
+            for (String part : parts) {
+                part = part.trim();
+                if (part.startsWith("filename=")) {
+                    return part.substring(10, part.length() - 1); // Remover las comillas
+                }
+            }
+        }
+        return null;
     }
 
     private String getContentType(BufferedReader headerReader) throws IOException {
