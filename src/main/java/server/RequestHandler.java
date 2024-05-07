@@ -1,4 +1,6 @@
 package server;
+import org.apache.commons.fileupload.MultipartStream;
+import org.json.JSONException;
 import org.json.JSONObject;
 import util.MimeTypes;
 import java.io.*;
@@ -7,6 +9,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 
@@ -23,7 +27,7 @@ public class RequestHandler implements Runnable {
             InputStream inputStream = clientSocket.getInputStream();
             OutputStream out = clientSocket.getOutputStream();
 
-            // Leer y parsear la línea inicial de la solicitud HTTP
+            // Usar BufferedReader para leer las cabeceras
             BufferedReader headerReader = new BufferedReader(new InputStreamReader(inputStream));
             String requestLine = headerReader.readLine();
             if (requestLine == null) return;
@@ -35,17 +39,18 @@ public class RequestHandler implements Runnable {
             // Imprimir en consola el método y el recurso solicitado
             System.out.println("Request: " + method + " " + resource);
 
-            // Obtener el Content-Type
-            String contentType = getContentType(headerReader);
+            // Leer Content-Length de las cabeceras
+            int contentLength = getContentLength(headerReader);
 
             switch (method) {
                 case "GET":
                     handleGet(resource, out);
                     break;
                 case "POST":
-                    handlePost(inputStream, out, contentType);
+                    handlePost(headerReader, inputStream, out);
                     break;
                 case "PUT":
+                    handlePut(headerReader, inputStream, resource, out);
                     break;
                 case "HEAD":
                     handleHead(resource, out);
@@ -97,24 +102,114 @@ public class RequestHandler implements Runnable {
         }
     }
 
-    private void handlePost(InputStream in, OutputStream out, String contentType) throws IOException {
-        // Leer el cuerpo de la solicitud
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in));
-        String body = reader.lines().collect(Collectors.joining(System.lineSeparator()));
+    private void handlePost(BufferedReader headerReader, InputStream inputStream, OutputStream out) throws IOException {
+        String contentType = getContentType(headerReader);
+        int contentLength = getContentLength(headerReader);
 
-        // Aquí puedes procesar el cuerpo y generar un archivo basado en los datos recibidos
-        // Por ejemplo, crear un archivo PDF, una imagen, etc.
-        // Vamos a suponer que generamos un archivo de texto simple para simplificar
-        Path filePath = Paths.get("output.txt");
-        Files.write(filePath, body.getBytes(StandardCharsets.UTF_8));
-
-        // Enviar el archivo generado como respuesta
-        sendFile(filePath, out);
+        if (contentType.equals("application/x-www-form-urlencoded")) {
+            String body = readBody(headerReader, contentLength);
+            String fileName = extractFileNameFromBody(body);
+            sendFile(fileName, out);
+        } else {
+            sendError(415, "Unsupported Media Type", out, false);
+        }
     }
 
-    private void handlePut(InputStream in, String resource, OutputStream out) throws IOException {
-
+    private String readBody(BufferedReader reader, int contentLength) throws IOException {
+        char[] body = new char[contentLength];
+        reader.read(body, 0, contentLength);
+        return new String(body);
     }
+
+
+    private String extractFileNameFromBody(String body) {
+        Map<String, String> params = Arrays.stream(body.split("&"))
+                .map(param -> param.split("="))
+                .collect(Collectors.toMap(p -> p[0], p -> p.length > 1 ? p[1] : null));
+        return params.get("filename");
+    }
+
+    private String extractFileNameFromJson(String json) {
+        try {
+            JSONObject obj = new JSONObject(json);
+            return obj.optString("filename", null);
+        } catch (JSONException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private void sendFile(String fileName, OutputStream out) throws IOException {
+        if (fileName == null || fileName.trim().isEmpty()) {
+            sendError(400, "Bad Request: Filename is required", out, false);
+            return;
+        }
+        Path filePath = Paths.get(fileName).toAbsolutePath(); // Asegúrate de que el path es seguro y válido
+        if (Files.exists(filePath)) {
+            String mimeType = MimeTypes.getMimeType(filePath.toString());
+            sendHeader(200, "OK", mimeType, Files.size(filePath), out);
+            Files.copy(filePath, out);
+            out.flush();
+        } else {
+            sendError(404, "Not Found", out, true);
+        }
+    }
+
+
+    private void handlePut(BufferedReader headerReader, InputStream in, String resource, OutputStream out) throws IOException {
+        // Obtén la ruta del archivo
+        Path filePath = getFilePath(resource);
+        System.out.println("Handling PUT for: " + filePath);
+
+        // Leer las cabeceras y encontrar la longitud del contenido
+        int contentLength = getContentLength(headerReader);
+        System.out.println("Content-Length: " + contentLength);
+
+        // Crea el archivo si no existe
+        if (!Files.exists(filePath)) {
+            Files.createFile(filePath);
+            System.out.println("File created: " + filePath);
+        }
+
+        // Escribir los datos del InputStream al archivo
+        try (OutputStream fileOut = new FileOutputStream(filePath.toFile())) {
+            byte[] buffer = new byte[1024];
+            int totalBytesRead = 0;
+            int bytesRead;
+
+            while (totalBytesRead < contentLength && (bytesRead = in.read(buffer)) != -1) {
+                fileOut.write(buffer, 0, bytesRead);
+                totalBytesRead += bytesRead;
+            }
+            System.out.println("Total bytes read: " + totalBytesRead);
+        }
+
+        // Comprobar si se escribieron datos
+        if (Files.size(filePath) > 0) {
+            System.out.println("File write successful: " + filePath);
+            sendHeader(200, "OK", "text/plain", Files.size(filePath), out);
+        } else {
+            System.out.println("File write failed: " + filePath);
+            sendError(500, "Internal Server Error: Failed to write file", out, false);
+        }
+    }
+
+    private int getContentLength(BufferedReader headerReader) throws IOException {
+        String line;
+        int contentLength = -1; // Inicializar a -1 para detectar si realmente se encontró la cabecera
+
+        while ((line = headerReader.readLine()) != null) {
+            System.out.println("Header: " + line); // Log para depuración
+            if (line.isEmpty()) {
+                break; // Fin de las cabeceras
+            }
+            if (line.toLowerCase().startsWith("content-length:")) {
+                contentLength = Integer.parseInt(line.substring(15).trim());
+            }
+        }
+        return contentLength;
+    }
+
 
     private Path getFilePath(String resource) {
         if ("/".equals(resource)) {
@@ -134,7 +229,7 @@ public class RequestHandler implements Runnable {
         writer.flush();
     }
 
-     private String getContentType(BufferedReader headerReader) throws IOException {
+    private String getContentType(BufferedReader headerReader) throws IOException {
         String line;
         String contentType = "application/octet-stream"; // Default value
         while (!(line = headerReader.readLine()).isEmpty()) {
@@ -146,27 +241,6 @@ public class RequestHandler implements Runnable {
         return contentType;
     }
 
-    private void sendFile(Path filePath, OutputStream out) throws IOException {
-        if (Files.exists(filePath)) {
-            String mimeType = MimeTypes.getMimeType(filePath.toString());
-            long fileSize = Files.size(filePath);
-
-            // Enviar cabeceras HTTP adecuadas para la descarga de archivos
-            PrintWriter writer = new PrintWriter(out, true);
-            writer.println("HTTP/1.1 200 OK");
-            writer.println("Content-Type: " + mimeType);
-            writer.println("Content-Disposition: attachment; filename=\"" + filePath.getFileName().toString() + "\"");
-            writer.println("Content-Length: " + fileSize);
-            writer.println(); // Línea en blanco para terminar las cabeceras
-            writer.flush();
-
-            // Enviar el archivo
-            Files.copy(filePath, out);
-            out.flush();
-        } else {
-            sendError(404, "File not found", out, true);
-        }
-    }
 
     private void sendError(int statusCode, String message, OutputStream out, boolean includeBody) throws IOException {
         // Construye el cuerpo de la respuesta si es necesario
