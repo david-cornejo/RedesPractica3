@@ -147,7 +147,7 @@ public class RequestHandler implements Runnable {
             sendHeader(201, "Created", "text/plain", 0, out);
         } catch (IOException e) {
             e.printStackTrace();
-            sendError(500, "Internal Server Error: " + e.getMessage(), out, true);
+            sendError(403, "Forbidden: " + e.getMessage(), out, true);
         } finally {
             inputStream.close();
             out.close();
