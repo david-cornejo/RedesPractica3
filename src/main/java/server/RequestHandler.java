@@ -1,7 +1,4 @@
 package server;
-import org.apache.commons.fileupload.MultipartStream;
-import org.json.JSONException;
-import org.json.JSONObject;
 import util.MimeTypes;
 import java.io.*;
 import java.net.Socket;
@@ -9,10 +6,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.stream.Collectors;
-
 
 public class RequestHandler implements Runnable {
     private final Socket clientSocket;
@@ -24,22 +17,31 @@ public class RequestHandler implements Runnable {
     @Override
     public void run() {
         try {
-            InputStream inputStream = clientSocket.getInputStream();
+            DataInputStream inputStream = new DataInputStream(clientSocket.getInputStream());
+            byte[] bytes = new byte[50000];
+            int t = inputStream.read(bytes);
+            String request = new String(bytes, 0, t);
+
             OutputStream out = clientSocket.getOutputStream();
 
-            // Usar BufferedReader para leer las cabeceras
-            BufferedReader headerReader = new BufferedReader(new InputStreamReader(inputStream));
+            System.out.println(request);
+
+            // Parse the request line
+            BufferedReader headerReader = new BufferedReader(new StringReader(request));
             String requestLine = headerReader.readLine();
-            if (requestLine == null) return;
+            if (requestLine == null || requestLine.isEmpty()) {
+                sendError(400, "Bad Request: Invalid Request Line", out, true);
+                return;
+            }
 
-            String[] requestTokens = requestLine.split(" ");
-            String method = requestTokens[0];
-            String resource = requestTokens[1];
+            String[] parts = requestLine.split(" ");
+            if (parts.length != 3) {
+                sendError(400, "Bad Request: Invalid Request Line", out, true);
+                return;
+            }
 
-            // Imprimir en consola el método y el recurso solicitado
-            System.out.println("Request: " + method + " " + resource);
-
-            // Leer Content-Length de las cabeceras
+            String method = parts[0];
+            String resource = parts[1];
             int contentLength = getContentLength(headerReader);
 
             switch (method) {
@@ -47,10 +49,10 @@ public class RequestHandler implements Runnable {
                     handleGet(resource, out);
                     break;
                 case "POST":
-                    handlePost(headerReader, inputStream, out);
+                    handlePost(headerReader, inputStream, out, contentLength);
                     break;
                 case "PUT":
-                    handlePut(headerReader, inputStream, resource, out);
+                    handlePut(resource, inputStream, out, contentLength, bytes, t, request);
                     break;
                 case "HEAD":
                     handleHead(resource, out);
@@ -82,7 +84,6 @@ public class RequestHandler implements Runnable {
         }
     }
 
-
     private void handleHead(String resource, OutputStream out) throws IOException {
         Path filePath = getFilePath(resource);
         if (Files.exists(filePath)) {
@@ -102,49 +103,19 @@ public class RequestHandler implements Runnable {
         }
     }
 
-    private void handlePost(BufferedReader headerReader, InputStream inputStream, OutputStream out) throws IOException {
-        String contentType = getContentType(headerReader);
-        int contentLength = getContentLength(headerReader);
+    private void handlePost(BufferedReader headerReader, InputStream inputStream, OutputStream out, int contentLength) throws IOException {
+        // Leer el cuerpo de la solicitud después de las cabeceras
+        StringBuilder bodyBuilder = new StringBuilder();
+        char[] buffer = new char[contentLength];
+        int bytesRead = headerReader.read(buffer, 0, contentLength);
+        bodyBuilder.append(buffer, 0, bytesRead);
 
-        if (contentType.equals("application/x-www-form-urlencoded")) {
-            String body = readBody(headerReader, contentLength);
-            String fileName = extractFileNameFromBody(body);
-            sendFile(fileName, out);
-        } else {
-            sendError(415, "Unsupported Media Type", out, false);
-        }
-    }
+        // Convertir el cuerpo de la solicitud a un String y eliminar espacios en blanco adicionales
+        String fileName = bodyBuilder.toString().trim();
+        System.out.println("File requested: " + fileName);
 
-    private String readBody(BufferedReader reader, int contentLength) throws IOException {
-        char[] body = new char[contentLength];
-        reader.read(body, 0, contentLength);
-        return new String(body);
-    }
-
-
-    private String extractFileNameFromBody(String body) {
-        Map<String, String> params = Arrays.stream(body.split("&"))
-                .map(param -> param.split("="))
-                .collect(Collectors.toMap(p -> p[0], p -> p.length > 1 ? p[1] : null));
-        return params.get("filename");
-    }
-
-    private String extractFileNameFromJson(String json) {
-        try {
-            JSONObject obj = new JSONObject(json);
-            return obj.optString("filename", null);
-        } catch (JSONException e) {
-            e.printStackTrace();
-            return null;
-        }
-    }
-
-    private void sendFile(String fileName, OutputStream out) throws IOException {
-        if (fileName == null || fileName.trim().isEmpty()) {
-            sendError(400, "Bad Request: Filename is required", out, false);
-            return;
-        }
-        Path filePath = Paths.get(fileName).toAbsolutePath(); // Asegúrate de que el path es seguro y válido
+        // Obtener la ruta del archivo solicitado
+        Path filePath = getFilePath("/" + fileName);
         if (Files.exists(filePath)) {
             String mimeType = MimeTypes.getMimeType(filePath.toString());
             sendHeader(200, "OK", mimeType, Files.size(filePath), out);
@@ -155,53 +126,41 @@ public class RequestHandler implements Runnable {
         }
     }
 
-
-    private void handlePut(BufferedReader headerReader, InputStream in, String resource, OutputStream out) throws IOException {
-        // Obtén la ruta del archivo
-        Path filePath = getFilePath(resource);
-        System.out.println("Handling PUT for: " + filePath);
-
-        // Leer las cabeceras y encontrar la longitud del contenido
-        int contentLength = getContentLength(headerReader);
-        System.out.println("Content-Length: " + contentLength);
-
-        // Crea el archivo si no existe
-        if (!Files.exists(filePath)) {
-            Files.createFile(filePath);
-            System.out.println("File created: " + filePath);
+    private void handlePut(String resource, InputStream inputStream, OutputStream out, int contentLength, byte[] fullRequest, int requestLength, String request) throws IOException {
+        // Leer el cuerpo de la solicitud después de las cabeceras
+        int headerEndIndex = request.indexOf("\r\n\r\n") + 4;
+        if (headerEndIndex < 4) {
+            sendError(400, "Bad Request: Invalid Request Body", out, true);
+            return;
         }
 
-        // Escribir los datos del InputStream al archivo
-        try (OutputStream fileOut = new FileOutputStream(filePath.toFile())) {
-            byte[] buffer = new byte[1024];
-            int totalBytesRead = 0;
-            int bytesRead;
+        int contentStartIndex = headerEndIndex;
+        byte[] content = new byte[contentLength];
+        System.arraycopy(fullRequest, contentStartIndex, content, 0, contentLength);
 
-            while (totalBytesRead < contentLength && (bytesRead = in.read(buffer)) != -1) {
-                fileOut.write(buffer, 0, bytesRead);
-                totalBytesRead += bytesRead;
-            }
-            System.out.println("Total bytes read: " + totalBytesRead);
-        }
+        String fileName = resource.substring(1);  // Quitar el primer slash '/'
+        Path filePath = getFilePath("/" + fileName);
+        Files.createDirectories(filePath.getParent());
 
-        // Comprobar si se escribieron datos
-        if (Files.size(filePath) > 0) {
-            System.out.println("File write successful: " + filePath);
-            sendHeader(200, "OK", "text/plain", Files.size(filePath), out);
-        } else {
-            System.out.println("File write failed: " + filePath);
-            sendError(500, "Internal Server Error: Failed to write file", out, false);
+        try (FileOutputStream fos = new FileOutputStream(filePath.toFile())) {
+            fos.write(content);
+            sendHeader(201, "Created", "text/plain", 0, out);
+        } catch (IOException e) {
+            e.printStackTrace();
+            sendError(500, "Internal Server Error: " + e.getMessage(), out, true);
+        } finally {
+            inputStream.close();
+            out.close();
         }
     }
 
     private int getContentLength(BufferedReader headerReader) throws IOException {
         String line;
-        int contentLength = -1; // Inicializar a -1 para detectar si realmente se encontró la cabecera
+        int contentLength = -1;
 
         while ((line = headerReader.readLine()) != null) {
-            System.out.println("Header: " + line); // Log para depuración
             if (line.isEmpty()) {
-                break; // Fin de las cabeceras
+                break;
             }
             if (line.toLowerCase().startsWith("content-length:")) {
                 contentLength = Integer.parseInt(line.substring(15).trim());
@@ -210,14 +169,11 @@ public class RequestHandler implements Runnable {
         return contentLength;
     }
 
-
     private Path getFilePath(String resource) {
         if ("/".equals(resource)) {
             resource = "/index.html";
         }
-        Path filePath = Paths.get(".", resource).toAbsolutePath();
-        System.out.println("File path: " + filePath);
-        return filePath;
+        return Paths.get("C:/Users/david/P3 Redes/Practica3/", resource).toAbsolutePath();
     }
 
     private void sendHeader(int statusCode, String statusText, String contentType, long contentLength, OutputStream out) throws IOException {
@@ -229,38 +185,18 @@ public class RequestHandler implements Runnable {
         writer.flush();
     }
 
-    private String getContentType(BufferedReader headerReader) throws IOException {
-        String line;
-        String contentType = "application/octet-stream"; // Default value
-        while (!(line = headerReader.readLine()).isEmpty()) {
-            if (line.toLowerCase().startsWith("content-type:")) {
-                contentType = line.substring(line.indexOf(":") + 1).trim();
-                break;
-            }
-        }
-        return contentType;
-    }
-
-
     private void sendError(int statusCode, String message, OutputStream out, boolean includeBody) throws IOException {
-        // Construye el cuerpo de la respuesta si es necesario
         String body = includeBody ? "<html><body><h1>" + message + "</h1></body></html>" : "";
 
-        // Crea el PrintWriter para enviar la respuesta
         PrintWriter writer = new PrintWriter(out, true);
-
-        // Envía las cabeceras HTTP
         writer.print("HTTP/1.1 " + statusCode + " " + message + "\r\n");
         writer.print("Content-Type: text/html\r\n");
         writer.print("Content-Length: " + body.getBytes(StandardCharsets.UTF_8).length + "\r\n");
         writer.print("\r\n");
 
-        // Envía el cuerpo de la respuesta solo si es necesario
         if (includeBody) {
             writer.print(body);
         }
         writer.flush();
     }
-
-
 }
